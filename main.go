@@ -22,8 +22,11 @@ import (
 )
 
 const steelAPI = "https://api.steel.dev/v1/sessions"
+const maxSteelSession = 15 * time.Minute
+const maxNoProgressSessions = 3
 
 var twitchLogin = regexp.MustCompile(`^[A-Za-z0-9_]{3,25}$`)
+var errNoPlayback = errors.New("no verified playback in consecutive Steel sessions")
 
 type cookie struct {
 	Name     string `json:"name"`
@@ -255,6 +258,11 @@ type activeWatch struct {
 	generation uint64
 }
 
+type watchCooldown struct {
+	streamID string
+	until    time.Time
+}
+
 func run(ctx context.Context, client *http.Client, cfg config, clientID, statePath string) error {
 	return runWithWatch(ctx, client, cfg, clientID, statePath, watchStream)
 }
@@ -270,6 +278,7 @@ func runWithWatch(ctx context.Context, client *http.Client, cfg config, clientID
 	defer cancelRun()
 	results := make(chan watchResult, len(cfg.Channels))
 	active := make(map[string]activeWatch)
+	retryAfter := make(map[string]watchCooldown)
 	var generation uint64
 	cancelActive := func() {
 		for channel, watch := range active {
@@ -295,7 +304,8 @@ func runWithWatch(ctx context.Context, client *http.Client, cfg config, clientID
 		for _, channel := range cfg.Channels {
 			id := streams[channel]
 			_, running := active[channel]
-			if id == "" || id == previous.CompletedStreams[channel] || running {
+			cooldown := retryAfter[channel]
+			if id == "" || id == previous.CompletedStreams[channel] || running || (cooldown.streamID == id && time.Now().Before(cooldown.until)) {
 				continue
 			}
 			log.Printf("channel=%s stream=%s is live; starting Steel watch", channel, id)
@@ -337,8 +347,12 @@ func runWithWatch(ctx context.Context, client *http.Client, cfg config, clientID
 				auth.notify(ctx)
 				cancelActive()
 			} else if result.err != nil {
+				if errors.Is(result.err, errNoPlayback) {
+					retryAfter[result.channel] = watchCooldown{streamID: result.streamID, until: time.Now().Add(5 * time.Minute)}
+				}
 				log.Printf("channel=%s watch failed: %s", result.channel, redactError(result.err, cfg))
 			} else {
+				delete(retryAfter, result.channel)
 				previous.CompletedStreams[result.channel] = result.streamID
 				if err := saveState(statePath, previous); err != nil {
 					return err
@@ -378,14 +392,62 @@ func saveState(path string, value state) error {
 }
 
 func watchStream(ctx context.Context, client *http.Client, cfg config, channel string) error {
-	// Reserve time for auth confirmation, playback startup, and cleanup.
-	timeout := time.Duration(cfg.WatchSeconds+130) * time.Second
-	return openSteelPage(ctx, client, cfg, "https://www.twitch.tv/"+channel, timeout, func(pageCtx context.Context, browser *cdpClient) error {
-		if err := confirmBrowserAuth(pageCtx, browser); err != nil {
+	target := time.Duration(cfg.WatchSeconds) * time.Second
+	return watchUntilPlayback(ctx, cfg, channel, target, 5*time.Second, func(watchCtx context.Context, timeout time.Duration, progress *playbackProgress) error {
+		return openSteelPage(watchCtx, client, cfg, "https://www.twitch.tv/"+channel, timeout, func(pageCtx context.Context, browser *cdpClient) error {
+			if err := confirmBrowserAuth(pageCtx, browser); err != nil {
+				return err
+			}
+			return waitForPlayback(pageCtx, browser, target, progress)
+		})
+	})
+}
+
+func watchUntilPlayback(ctx context.Context, cfg config, channel string, target, retryBase time.Duration, attempt func(context.Context, time.Duration, *playbackProgress) error) error {
+	// Give the default five-minute watch up to 15 minutes, including reconnects.
+	budget := max(maxSteelSession, target+10*time.Minute)
+	watchCtx, cancel := context.WithTimeout(ctx, budget)
+	defer cancel()
+	var progress playbackProgress
+	failedSessions := 0
+	deadline, _ := watchCtx.Deadline()
+	for progress.watched < target {
+		remaining := time.Until(deadline)
+		if remaining < 30*time.Second {
+			return fmt.Errorf("only %s of %s verified before watch deadline", progress.watched.Truncate(time.Second), target)
+		}
+		timeout := min(remaining, maxSteelSession)
+		beforeSession := progress.watched
+		err := attempt(watchCtx, timeout, &progress)
+		if progress.watched >= target {
+			return nil
+		}
+		if err == nil {
+			err = errors.New("Steel watch ended before playback target")
+		}
+		if errors.Is(err, errTwitchAuthLost) {
 			return err
 		}
-		return waitForPlayback(pageCtx, browser, time.Duration(cfg.WatchSeconds)*time.Second)
-	})
+		if watchCtx.Err() != nil {
+			return fmt.Errorf("only %s of %s verified: %w", progress.watched.Truncate(time.Second), target, watchCtx.Err())
+		}
+		if progress.watched > beforeSession {
+			failedSessions = 0
+		} else {
+			failedSessions++
+		}
+		if failedSessions >= maxNoProgressSessions {
+			return fmt.Errorf("%w: %d sessions without progress (%s/%s total): %v", errNoPlayback, failedSessions, progress.watched.Truncate(time.Second), target, err)
+		}
+		log.Printf("channel=%s Steel watch interrupted after %s/%s verified; retrying: %s", channel, progress.watched.Truncate(time.Second), target, redactError(err, cfg))
+		backoff := min(time.Duration(max(1, failedSessions))*retryBase, time.Minute)
+		select {
+		case <-watchCtx.Done():
+			return watchCtx.Err()
+		case <-time.After(backoff):
+		}
+	}
+	return nil
 }
 
 func probeSteel(ctx context.Context, client *http.Client, cfg config) error {
@@ -427,44 +489,98 @@ func openSteelPage(ctx context.Context, client *http.Client, cfg config, pageURL
 	return action(pageCtx, browser)
 }
 
-func waitForPlayback(ctx context.Context, browser *cdpClient, duration time.Duration) error {
+type playbackSample struct {
+	Present bool    `json:"present"`
+	Ready   bool    `json:"ready"`
+	Paused  bool    `json:"paused"`
+	Ended   bool    `json:"ended"`
+	Time    float64 `json:"time"`
+	Login   bool    `json:"login"`
+}
+
+type playbackProgress struct {
+	watched time.Duration
+}
+
+// Add only video time observed between two nearby, ready and playing samples.
+// Long CDP gaps and unloaded/paused intervals never count toward the target.
+func (progress *playbackProgress) add(previous, current playbackSample, elapsed time.Duration) time.Duration {
+	if !previous.Present || !previous.Ready || previous.Paused || previous.Ended ||
+		!current.Present || !current.Ready || current.Paused || current.Ended ||
+		current.Time <= previous.Time || elapsed <= 0 || elapsed > 7*time.Second {
+		return 0
+	}
+	seconds := math.Min(current.Time-previous.Time, elapsed.Seconds())
+	if seconds <= 0 || math.IsNaN(seconds) || math.IsInf(seconds, 0) {
+		return 0
+	}
+	delta := time.Duration(seconds * float64(time.Second))
+	progress.watched += delta
+	return delta
+}
+
+func waitForPlayback(ctx context.Context, browser *cdpClient, target time.Duration, progress *playbackProgress) error {
 	startDeadline := time.Now().Add(60 * time.Second)
 	var lastProgress time.Time
 	var lastSample time.Time
-	var watched time.Duration
-	var previous float64
+	var previous playbackSample
 	for {
-		var playback struct {
-			Present bool    `json:"present"`
-			Paused  bool    `json:"paused"`
-			Time    float64 `json:"time"`
-			Login   bool    `json:"login"`
-		}
+		var playback playbackSample
 		err := browser.Evaluate(ctx, `(() => {
-			const login = document.querySelector('button[data-a-target="login-button"]');
-			const video = document.querySelector('video');
-			if (!video) return {present:false,paused:true,time:0,login:!!login && !!login.getClientRects().length};
+			const login = `+twitchLoginButtonJS+`;
+			const video = document.querySelector('[data-a-target="video-ref"] video') ||
+				document.querySelector('[data-a-target="video-player"] video[aria-label="Twitch video player"]') ||
+				document.querySelector('video[aria-label="Twitch video player"]');
+			if (!video) return {present:false,ready:false,paused:true,ended:false,time:0,login};
 			video.muted = true;
 			if (video.paused) video.play().catch(() => {});
-			return {present:true,paused:video.paused,time:video.currentTime,login:!!login && !!login.getClientRects().length};
+			return {present:!!video.getClientRects().length,ready:video.readyState >= 2,paused:video.paused,ended:video.ended,time:video.currentTime,login};
 		})()`, &playback)
 		if err != nil {
-			return fmt.Errorf("check Twitch playback: %w", err)
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			if !errors.Is(err, errCDPConnection) {
+				return fmt.Errorf("check Twitch playback: %w", err)
+			}
+			log.Print("Steel control connection dropped; reconnecting without counting the gap")
+			var reconnectErr error
+			for attempt := 0; attempt < 3; attempt++ {
+				if attempt > 0 {
+					select {
+					case <-ctx.Done():
+						return ctx.Err()
+					case <-time.After(2 * time.Second):
+					}
+				}
+				reconnectErr = browser.Reconnect(ctx)
+				if reconnectErr == nil {
+					break
+				}
+			}
+			if reconnectErr != nil {
+				return fmt.Errorf("reconnect to Steel session: %w", reconnectErr)
+			}
+			if err := confirmBrowserAuth(ctx, browser); err != nil {
+				return err
+			}
+			previous = playbackSample{}
+			lastSample = time.Time{}
+			lastProgress = time.Time{}
+			startDeadline = time.Now().Add(60 * time.Second)
+			continue
 		}
 		now := time.Now()
 		if playback.Login {
 			return errTwitchAuthLost
 		}
-		if playback.Present && !playback.Paused && playback.Time > previous+0.5 {
+		if !lastSample.IsZero() && progress.add(previous, playback, now.Sub(lastSample)) > 0 {
 			if lastProgress.IsZero() {
 				log.Print("Twitch video playback confirmed")
-			} else {
-				playbackDelta := time.Duration(math.Min(playback.Time-previous, now.Sub(lastSample).Seconds()) * float64(time.Second))
-				watched += playbackDelta
 			}
 			lastProgress = now
 		}
-		if watched >= duration {
+		if progress.watched >= target {
 			return nil
 		}
 		if now.After(startDeadline) && lastProgress.IsZero() {
@@ -473,7 +589,7 @@ func waitForPlayback(ctx context.Context, browser *cdpClient, duration time.Dura
 		if !lastProgress.IsZero() && now.Sub(lastProgress) > 30*time.Second {
 			return errors.New("Twitch playback stalled for 30 seconds")
 		}
-		previous = playback.Time
+		previous = playback
 		lastSample = now
 		select {
 		case <-ctx.Done():

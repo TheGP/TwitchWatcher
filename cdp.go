@@ -15,10 +15,13 @@ import (
 // cdpClient sends only the browser commands this watcher needs. Steel's browser
 // websocket uses the Chrome DevTools Protocol with flat target sessions.
 type cdpClient struct {
-	conn      *websocket.Conn
-	sessionID string
-	nextID    int
+	conn         *websocket.Conn
+	websocketURL string
+	sessionID    string
+	nextID       int
 }
+
+var errCDPConnection = errors.New("Steel control connection lost")
 
 func connectCDP(ctx context.Context, websocketURL string) (*cdpClient, error) {
 	parsed, err := url.Parse(websocketURL)
@@ -29,7 +32,7 @@ func connectCDP(ctx context.Context, websocketURL string) (*cdpClient, error) {
 	if err != nil {
 		return nil, err
 	}
-	browser := &cdpClient{conn: conn}
+	browser := &cdpClient{conn: conn, websocketURL: websocketURL}
 	var targets struct {
 		TargetInfos []struct {
 			ID   string `json:"targetId"`
@@ -78,6 +81,16 @@ func connectCDP(ctx context.Context, websocketURL string) (*cdpClient, error) {
 
 func (browser *cdpClient) Close() error { return browser.conn.Close() }
 
+func (browser *cdpClient) Reconnect(ctx context.Context) error {
+	_ = browser.Close()
+	next, err := connectCDP(ctx, browser.websocketURL)
+	if err != nil {
+		return err
+	}
+	*browser = *next
+	return nil
+}
+
 func (browser *cdpClient) call(ctx context.Context, page bool, method string, params any, result any) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -96,18 +109,18 @@ func (browser *cdpClient) call(ctx context.Context, page bool, method string, pa
 		deadline = ctxDeadline
 	}
 	if err := browser.conn.SetWriteDeadline(deadline); err != nil {
-		return err
+		return fmt.Errorf("%w: set write deadline: %w", errCDPConnection, err)
 	}
 	if err := browser.conn.WriteJSON(request); err != nil {
-		return fmt.Errorf("send %s: %w", method, err)
+		return fmt.Errorf("%w: send %s: %w", errCDPConnection, method, err)
 	}
 	if err := browser.conn.SetReadDeadline(deadline); err != nil {
-		return err
+		return fmt.Errorf("%w: set read deadline: %w", errCDPConnection, err)
 	}
 	for {
 		_, raw, err := browser.conn.ReadMessage()
 		if err != nil {
-			return fmt.Errorf("read %s: %w", method, err)
+			return fmt.Errorf("%w: read %s: %w", errCDPConnection, method, err)
 		}
 		var reply struct {
 			ID     int             `json:"id"`

@@ -19,6 +19,14 @@ var (
 	validTelegramToken = regexp.MustCompile(`^[0-9]+:[A-Za-z0-9_-]+$`)
 )
 
+// Twitch's test hook is preferred; scoped header button text is a fallback.
+const twitchLoginButtonJS = `(() => {
+	const login = document.querySelector('button[data-a-target="login-button"]');
+	if (login && login.getClientRects().length) return true;
+	return [...document.querySelectorAll('[data-a-target="user-card"] button')].some(button =>
+		button.getClientRects().length && /^log in$/i.test((button.getAttribute('aria-label') || button.textContent || '').trim()));
+})()`
+
 type httpStatusError struct{ code int }
 
 func (err httpStatusError) Error() string { return fmt.Sprintf("HTTP %d", err.code) }
@@ -70,9 +78,8 @@ func confirmBrowserAuth(ctx context.Context, browser *cdpClient) error {
 	err := browser.Evaluate(ctx, `(async () => {
 		const samples = [];
 		for (let i = 0; i < 3; i++) {
-			const login = document.querySelector('button[data-a-target="login-button"]');
-			const menu = document.querySelector('[data-a-target="user-menu-toggle"]');
-			samples.push({login:!!login && !!login.getClientRects().length,menu:!!menu && !!menu.getClientRects().length});
+			const menu = document.querySelector('[data-a-target="user-menu-toggle"],button[aria-label="User Menu"]');
+			samples.push({login:`+twitchLoginButtonJS+`,menu:!!menu && !!menu.getClientRects().length});
 			if (i < 2) await new Promise(resolve => setTimeout(resolve, 2000));
 		}
 		return samples;

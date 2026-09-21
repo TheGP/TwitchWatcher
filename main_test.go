@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -200,5 +201,94 @@ func TestRedactError(t *testing.T) {
 	message := redactError(errors.New("steel-secret twitch-secret http://proxy-secret@host:80 cookie-secret"), cfg)
 	if strings.Contains(message, "secret") {
 		t.Fatalf("secret leaked in log message: %s", message)
+	}
+}
+
+func TestPlaybackProgressCountsOnlyVerifiedReadyVideo(t *testing.T) {
+	var progress playbackProgress
+	playing := playbackSample{Present: true, Ready: true, Time: 10}
+	next := playbackSample{Present: true, Ready: true, Time: 15}
+	if delta := progress.add(playing, next, 5*time.Second); delta != 5*time.Second {
+		t.Fatalf("playing video credited %s, want 5s", delta)
+	}
+	paused := next
+	paused.Paused = true
+	if delta := progress.add(next, paused, 5*time.Second); delta != 0 {
+		t.Fatalf("paused video credited %s", delta)
+	}
+	unloaded := next
+	unloaded.Ready = false
+	if delta := progress.add(unloaded, playbackSample{Present: true, Ready: true, Time: 30}, 5*time.Second); delta != 0 {
+		t.Fatalf("unloaded video credited %s", delta)
+	}
+	missing := next
+	missing.Present = false
+	if delta := progress.add(missing, playbackSample{Present: true, Ready: true, Time: 35}, 5*time.Second); delta != 0 {
+		t.Fatalf("missing video credited %s", delta)
+	}
+	jump := playbackSample{Present: true, Ready: true, Time: 45}
+	if delta := progress.add(next, jump, 30*time.Second); delta != 0 {
+		t.Fatalf("long unobserved gap credited %s", delta)
+	}
+	reset := playing
+	if delta := progress.add(jump, reset, 5*time.Second); delta != 0 {
+		t.Fatalf("reset video timeline credited %s", delta)
+	}
+	if progress.watched != 5*time.Second {
+		t.Fatalf("verified progress=%s, want 5s", progress.watched)
+	}
+}
+
+func TestWatchUntilPlaybackCarriesProgressAcrossSessions(t *testing.T) {
+	attempts := 0
+	err := watchUntilPlayback(context.Background(), config{}, "example", 5*time.Second, 0, func(_ context.Context, timeout time.Duration, progress *playbackProgress) error {
+		attempts++
+		if timeout > maxSteelSession {
+			t.Fatalf("session timeout exceeds 15 minutes: %s", timeout)
+		}
+		if attempts == 1 {
+			progress.watched += 2 * time.Second
+			return errors.New("control connection dropped")
+		}
+		progress.watched += 3 * time.Second
+		return nil
+	})
+	if err != nil || attempts != 2 {
+		t.Fatalf("progress did not carry between sessions: attempts=%d err=%v", attempts, err)
+	}
+}
+
+func TestWatchUntilPlaybackBoundsEmptySessions(t *testing.T) {
+	attempts := 0
+	err := watchUntilPlayback(context.Background(), config{}, "example", 5*time.Second, 0, func(_ context.Context, _ time.Duration, _ *playbackProgress) error {
+		attempts++
+		return errors.New("proxy tunnel failed")
+	})
+	if !errors.Is(err, errNoPlayback) || attempts != maxNoProgressSessions {
+		t.Fatalf("no-progress retry limit: attempts=%d err=%v", attempts, err)
+	}
+}
+
+func TestRunCoolsDownSameStreamAfterNoPlayback(t *testing.T) {
+	client := &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		switch request.URL.Host {
+		case "id.twitch.tv":
+			return response(http.StatusOK, `{"client_id":"test-client"}`), nil
+		case "api.twitch.tv":
+			return response(http.StatusOK, `{"data":[{"id":"stream-1","user_login":"one"}]}`), nil
+		default:
+			return nil, fmt.Errorf("unexpected request host %s", request.URL.Host)
+		}
+	})}
+	var attempts atomic.Int32
+	watch := func(context.Context, *http.Client, config, string) error {
+		attempts.Add(1)
+		return errNoPlayback
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2300*time.Millisecond)
+	defer cancel()
+	err := runWithWatch(ctx, client, config{Channels: []string{"one"}, Cookies: []cookie{{Name: "auth-token", Value: "valid", Domain: ".twitch.tv"}}, PollSeconds: 1}, "test-client", filepath.Join(t.TempDir(), "state.json"), watch)
+	if !errors.Is(err, context.DeadlineExceeded) || attempts.Load() != 1 {
+		t.Fatalf("same stream restarted during cooldown: attempts=%d err=%v", attempts.Load(), err)
 	}
 }
