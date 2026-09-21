@@ -43,6 +43,8 @@ $config = [ordered]@{
     watch_seconds = 300
     twitch_token = ((Get-EnvValue $twitchEnvPath 'BOT_OAUTH') -replace '^oauth:', '')
     steel_api_key = Get-EnvValue $discoveryEnvPath 'STEEL_API_KEY'
+    telegram_bot = ((Get-EnvValue $twitchEnvPath 'DEVELOPER_TELEGRAM_BOT_TOKEN') -replace '^bot', '')
+    telegram_chat = Get-EnvValue $twitchEnvPath 'DEVELOPER_TELEGRAM_CHAT_ID'
     proxy_url = $ProxyUrl
     cookies = @($cookies | ForEach-Object {
         [ordered]@{

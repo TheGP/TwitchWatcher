@@ -41,12 +41,16 @@ type config struct {
 	WatchSeconds int      `json:"watch_seconds"`
 	TwitchToken  string   `json:"twitch_token"`
 	SteelAPIKey  string   `json:"steel_api_key"`
+	TelegramBot  string   `json:"telegram_bot"`
+	TelegramChat string   `json:"telegram_chat"`
 	ProxyURL     string   `json:"proxy_url"`
 	Cookies      []cookie `json:"cookies"`
 }
 
 type state struct {
 	CompletedStreamID string `json:"completed_stream_id"`
+	AuthLost          bool   `json:"auth_lost"`
+	AuthAlerted       bool   `json:"auth_alerted"`
 }
 
 type steelSession struct {
@@ -72,15 +76,10 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	for _, item := range cfg.Cookies {
-		if item.Name == "auth-token" && (item.Domain == ".twitch.tv" || item.Domain == "twitch.tv") {
-			if _, err := validateTwitchToken(ctx, client, item.Value); err != nil {
-				log.Fatalf("Firefox Twitch login cookie is invalid: %v", err)
-			}
-			break
-		}
-	}
 	if *check {
+		if _, err := validateTwitchToken(ctx, client, viewerToken(cfg)); err != nil {
+			log.Fatalf("Firefox Twitch login cookie is invalid: %v", err)
+		}
 		id, err := liveStreamID(ctx, client, cfg.Channel, cfg.TwitchToken, clientID)
 		if err != nil {
 			log.Fatal(err)
@@ -89,6 +88,9 @@ func main() {
 		return
 	}
 	if *probe {
+		if _, err := validateTwitchToken(ctx, client, viewerToken(cfg)); err != nil {
+			log.Fatalf("Firefox Twitch login cookie is invalid: %v", err)
+		}
 		if err := probeSteel(ctx, client, cfg); err != nil {
 			log.Fatal(redactError(err, cfg))
 		}
@@ -109,8 +111,8 @@ func loadConfig(path string) (config, error) {
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		return cfg, fmt.Errorf("parse config: %w", err)
 	}
-	if !twitchLogin.MatchString(cfg.Channel) || cfg.TwitchToken == "" || cfg.SteelAPIKey == "" {
-		return cfg, errors.New("config requires channel, twitch_token, and steel_api_key")
+	if !twitchLogin.MatchString(cfg.Channel) || cfg.TwitchToken == "" || cfg.SteelAPIKey == "" || !validTelegramToken.MatchString(cfg.TelegramBot) || cfg.TelegramChat == "" {
+		return cfg, errors.New("config requires channel, twitch_token, steel_api_key, telegram_bot, and telegram_chat")
 	}
 	hasAuth := false
 	for _, item := range cfg.Cookies {
@@ -189,7 +191,7 @@ func getJSON(client *http.Client, request *http.Request, target any) error {
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
-		return fmt.Errorf("HTTP %d", response.StatusCode)
+		return httpStatusError{code: response.StatusCode}
 	}
 	return json.NewDecoder(io.LimitReader(response.Body, 1<<20)).Decode(target)
 }
@@ -204,20 +206,32 @@ func run(ctx context.Context, client *http.Client, cfg config, clientID, statePa
 		return fmt.Errorf("read state: %w", err)
 	}
 	log.Printf("monitoring %s every %d seconds", cfg.Channel, cfg.PollSeconds)
+	auth := authMonitor{client: client, cfg: cfg, state: &previous, statePath: statePath}
 	for {
-		id, err := liveStreamID(ctx, client, cfg.Channel, cfg.TwitchToken, clientID)
+		canWatch, err := auth.check(ctx)
 		if err != nil {
-			log.Printf("live check failed: %v", err)
-		} else if id != "" && id != previous.CompletedStreamID {
-			log.Printf("stream %s is live; starting Steel watch", id)
-			if err := watchStream(ctx, client, cfg); err != nil {
-				log.Printf("watch failed: %s", redactError(err, cfg))
-			} else {
-				previous.CompletedStreamID = id
-				if err := saveState(statePath, previous); err != nil {
-					return err
+			return err
+		}
+		if canWatch {
+			id, err := liveStreamID(ctx, client, cfg.Channel, cfg.TwitchToken, clientID)
+			if err != nil {
+				log.Printf("live check failed: %v", err)
+			} else if id != "" && id != previous.CompletedStreamID {
+				log.Printf("stream %s is live; starting Steel watch", id)
+				if err := watchStream(ctx, client, cfg); err != nil {
+					if errors.Is(err, errTwitchAuthLost) {
+						auth.markLost()
+						auth.notify(ctx)
+					} else {
+						log.Printf("watch failed: %s", redactError(err, cfg))
+					}
+				} else {
+					previous.CompletedStreamID = id
+					if err := saveState(statePath, previous); err != nil {
+						return err
+					}
+					log.Printf("completed %d seconds for stream %s", cfg.WatchSeconds, id)
 				}
-				log.Printf("completed %d seconds for stream %s", cfg.WatchSeconds, id)
 			}
 		}
 		select {
@@ -230,7 +244,7 @@ func run(ctx context.Context, client *http.Client, cfg config, clientID, statePa
 
 func redactError(err error, cfg config) string {
 	message := err.Error()
-	secrets := []string{cfg.SteelAPIKey, cfg.TwitchToken, cfg.ProxyURL}
+	secrets := []string{cfg.SteelAPIKey, cfg.TwitchToken, cfg.TelegramBot, cfg.ProxyURL}
 	for _, item := range cfg.Cookies {
 		secrets = append(secrets, item.Value)
 	}
@@ -257,31 +271,19 @@ func saveState(path string, value state) error {
 }
 
 func watchStream(ctx context.Context, client *http.Client, cfg config) error {
-	// Reserve time for navigation and cleanup beyond the requested viewing period.
-	timeout := time.Duration(cfg.WatchSeconds+90) * time.Second
+	// Reserve time for auth confirmation, playback startup, and cleanup.
+	timeout := time.Duration(cfg.WatchSeconds+130) * time.Second
 	return openSteelPage(ctx, client, cfg, "https://www.twitch.tv/"+cfg.Channel, timeout, func(pageCtx context.Context, browser *cdpClient) error {
+		if err := confirmBrowserAuth(pageCtx, browser); err != nil {
+			return err
+		}
 		return waitForPlayback(pageCtx, browser, time.Duration(cfg.WatchSeconds)*time.Second)
 	})
 }
 
 func probeSteel(ctx context.Context, client *http.Client, cfg config) error {
 	return openSteelPage(ctx, client, cfg, "https://www.twitch.tv/", 90*time.Second, func(pageCtx context.Context, browser *cdpClient) error {
-		deadline := time.Now().Add(30 * time.Second)
-		for time.Now().Before(deadline) {
-			var loggedIn bool
-			if err := browser.Evaluate(pageCtx, `Boolean(document.querySelector('[data-a-target="user-menu-toggle"]'))`, &loggedIn); err != nil {
-				return err
-			}
-			if loggedIn {
-				return nil
-			}
-			select {
-			case <-pageCtx.Done():
-				return pageCtx.Err()
-			case <-time.After(time.Second):
-			}
-		}
-		return errors.New("Twitch account menu did not appear in Steel within 30 seconds")
+		return confirmBrowserAuth(pageCtx, browser)
 	})
 }
 
@@ -329,18 +331,23 @@ func waitForPlayback(ctx context.Context, browser *cdpClient, duration time.Dura
 			Present bool    `json:"present"`
 			Paused  bool    `json:"paused"`
 			Time    float64 `json:"time"`
+			Login   bool    `json:"login"`
 		}
 		err := browser.Evaluate(ctx, `(() => {
+			const login = document.querySelector('button[data-a-target="login-button"]');
 			const video = document.querySelector('video');
-			if (!video) return {present:false,paused:true,time:0};
+			if (!video) return {present:false,paused:true,time:0,login:!!login && !!login.getClientRects().length};
 			video.muted = true;
 			if (video.paused) video.play().catch(() => {});
-			return {present:true,paused:video.paused,time:video.currentTime};
+			return {present:true,paused:video.paused,time:video.currentTime,login:!!login && !!login.getClientRects().length};
 		})()`, &playback)
 		if err != nil {
 			return fmt.Errorf("check Twitch playback: %w", err)
 		}
 		now := time.Now()
+		if playback.Login {
+			return errTwitchAuthLost
+		}
 		if playback.Present && !playback.Paused && playback.Time > previous+0.5 {
 			if lastProgress.IsZero() {
 				log.Print("Twitch video playback confirmed")

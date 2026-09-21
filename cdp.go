@@ -170,7 +170,7 @@ func (browser *cdpClient) Evaluate(ctx context.Context, expression string, value
 		} `json:"result"`
 		ExceptionDetails json.RawMessage `json:"exceptionDetails"`
 	}
-	if err := browser.call(ctx, true, "Runtime.evaluate", map[string]any{"expression": expression, "returnByValue": true}, &reply); err != nil {
+	if err := browser.call(ctx, true, "Runtime.evaluate", map[string]any{"expression": expression, "returnByValue": true, "awaitPromise": true}, &reply); err != nil {
 		return err
 	}
 	if len(reply.ExceptionDetails) > 0 {

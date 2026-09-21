@@ -4,6 +4,8 @@
   "watch_seconds": 300,
   "twitch_token": "Twitch OAuth access token for Helix",
   "steel_api_key": "Steel API key",
+  "telegram_bot": "Telegram bot token",
+  "telegram_chat": "Telegram chat ID",
   "proxy_url": "http://user:password@public-proxy-host:port",
   "cookies": [
     {

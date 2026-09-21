@@ -11,19 +11,20 @@ import (
 
 func TestLoadConfigRejectsLocalProxyAndMissingAuth(t *testing.T) {
 	base := config{
-		Channel: "shaneboehm", TwitchToken: "token", SteelAPIKey: "key",
+		Channel: "shaneboehm", TwitchToken: "token", SteelAPIKey: "key", TelegramBot: "123:abcdef", TelegramChat: "42",
 		ProxyURL: "http://user:password@proxy.example.com:8080",
-		Cookies: []cookie{{Name: "auth-token", Value: "cookie", Domain: ".twitch.tv"}},
+		Cookies:  []cookie{{Name: "auth-token", Value: "cookie", Domain: ".twitch.tv"}},
 	}
 	for _, test := range []struct {
-		name string
-		edit func(*config)
+		name      string
+		edit      func(*config)
 		wantError bool
 	}{
 		{"valid", func(*config) {}, false},
 		{"local proxy", func(cfg *config) { cfg.ProxyURL = "http://127.0.0.1:3128" }, true},
 		{"private proxy", func(cfg *config) { cfg.ProxyURL = "http://192.168.0.53:3128" }, true},
 		{"missing auth", func(cfg *config) { cfg.Cookies = nil }, true},
+		{"missing Telegram", func(cfg *config) { cfg.TelegramBot = "" }, true},
 		{"bad channel", func(cfg *config) { cfg.Channel = "bad/channel" }, true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
