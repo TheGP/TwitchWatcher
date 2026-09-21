@@ -1,0 +1,17 @@
+{
+  "channel": "shaneboehm",
+  "poll_seconds": 30,
+  "watch_seconds": 300,
+  "twitch_token": "Twitch OAuth access token for Helix",
+  "steel_api_key": "Steel API key",
+  "proxy_url": "http://user:password@public-proxy-host:port",
+  "cookies": [
+    {
+      "name": "auth-token",
+      "value": "Firefox Twitch auth-token cookie",
+      "domain": ".twitch.tv",
+      "path": "/",
+      "secure": true
+    }
+  ]
+}

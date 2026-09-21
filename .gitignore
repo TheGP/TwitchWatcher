@@ -1,0 +1,6 @@
+config.json
+state.json
+state.json.tmp
+twitch-watcher
+twitch-watcher.new
+*.log

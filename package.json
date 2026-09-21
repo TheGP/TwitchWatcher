@@ -1,0 +1,7 @@
+{
+  "name": "twitch-watcher",
+  "private": true,
+  "scripts": {
+    "deploy": "bash deploy.sh"
+  }
+}
