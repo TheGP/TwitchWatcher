@@ -38,12 +38,20 @@ if (-not ($cookies | Where-Object { $_.name -eq 'auth-token' })) {
 }
 
 if (-not $ProxyUrl) {
-    $dataImpulse = Get-EnvValue $discoveryEnvPath 'PROXY_DATAIMPULSE_LP'
-    $login, $password = $dataImpulse -split ':', 2
-    if (-not $login -or -not $password) { throw 'Invalid PROXY_DATAIMPULSE_LP format.' }
-    $proxyUser = [uri]::EscapeDataString($login + '__cr.us')
-    $proxyPassword = [uri]::EscapeDataString($password)
-    $ProxyUrl = "http://${proxyUser}:${proxyPassword}@gw.dataimpulse.com:10000"
+    # Steel connects directly to warmer's public HTTP 3proxy, not the Windows listener.
+    $threeProxyConfig = Get-Content -LiteralPath 'C:\3proxy\3proxy.cfg' -Raw
+    $parent = [regex]::Match($threeProxyConfig, '(?m)^# warmer\s*\r?\n#parent\s+1000\s+socks5\+\s+(104\.219\.236\.83)\s+1080\s+(\S+)\s+(\S+)\s*$')
+    if (-not $parent.Success) { throw 'Cannot find warmer 3proxy credentials in C:\3proxy\3proxy.cfg.' }
+    $hostName = $parent.Groups[1].Value
+    $proxyPort = 7743
+    $proxyUser = [uri]::EscapeDataString($parent.Groups[2].Value)
+    $proxyPassword = [uri]::EscapeDataString($parent.Groups[3].Value)
+    $ProxyUrl = "http://${proxyUser}:${proxyPassword}@${hostName}:${proxyPort}"
+}
+
+$parsedProxy = [uri]$ProxyUrl
+if ($parsedProxy.Host -eq 'dataimpulse.com' -or $parsedProxy.Host.EndsWith('.dataimpulse.com', [StringComparison]::OrdinalIgnoreCase)) {
+    throw 'This project does not use DataImpulse proxies.'
 }
 
 $config = [ordered]@{

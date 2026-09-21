@@ -143,8 +143,11 @@ func loadConfig(path string) (config, error) {
 		return cfg, errors.New("config requires a Twitch auth-token cookie")
 	}
 	proxy, err := url.Parse(cfg.ProxyURL)
-	if err != nil || proxy.Host == "" || (proxy.Scheme != "http" && proxy.Scheme != "https" && proxy.Scheme != "socks5") {
-		return cfg, errors.New("proxy_url must be a reachable http, https, or socks5 proxy URL")
+	if err != nil || proxy.Host == "" || (proxy.Scheme != "http" && proxy.Scheme != "https") {
+		return cfg, errors.New("proxy_url must be a reachable http or https proxy URL")
+	}
+	if host := strings.ToLower(proxy.Hostname()); host == "dataimpulse.com" || strings.HasSuffix(host, ".dataimpulse.com") {
+		return cfg, errors.New("DataImpulse proxies are disabled for this project")
 	}
 	if host := proxy.Hostname(); host == "localhost" {
 		return cfg, errors.New("Steel cannot reach a local proxy; configure a public proxy endpoint")

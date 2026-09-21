@@ -6,7 +6,7 @@
   "steel_api_key": "Steel API key",
   "telegram_bot": "Telegram bot token",
   "telegram_chat": "Telegram chat ID",
-  "proxy_url": "http://user:password@public-proxy-host:port",
+  "proxy_url": "http://user:password@public-3proxy-host:7743",
   "cookies": [
     {
       "name": "auth-token",

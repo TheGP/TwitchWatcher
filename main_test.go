@@ -28,6 +28,8 @@ func TestLoadConfigRejectsLocalProxyAndMissingAuth(t *testing.T) {
 		{"valid", func(*config) {}, false},
 		{"local proxy", func(cfg *config) { cfg.ProxyURL = "http://127.0.0.1:3128" }, true},
 		{"private proxy", func(cfg *config) { cfg.ProxyURL = "http://192.168.0.53:3128" }, true},
+		{"disallowed proxy", func(cfg *config) { cfg.ProxyURL = "http://user:pass@gw.dataimpulse.com:10000" }, true},
+		{"socks unsupported by Steel", func(cfg *config) { cfg.ProxyURL = "socks5://user:pass@104.219.236.83:1080" }, true},
 		{"missing auth", func(cfg *config) { cfg.Cookies = nil }, true},
 		{"missing Telegram", func(cfg *config) { cfg.TelegramBot = "" }, true},
 		{"missing channels", func(cfg *config) { cfg.Channels = nil }, true},
