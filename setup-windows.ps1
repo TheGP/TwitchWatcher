@@ -1,4 +1,5 @@
 param(
+    [string[]]$Channels,
     [string]$ProxyUrl,
     [string]$FirefoxProfile = "$env:APPDATA\Mozilla\Firefox\Profiles\6tpb3qyy.default-release"
 )
@@ -6,6 +7,14 @@ param(
 $ErrorActionPreference = 'Stop'
 $twitchEnvPath = 'C:\Users\gp\apps\twitch\.env'
 $discoveryEnvPath = 'C:\Users\gp\apps\DiscoveryProject\.env'
+$output = Join-Path $PSScriptRoot 'config.json'
+
+if (-not $Channels -and (Test-Path -LiteralPath $output)) {
+    $existing = Get-Content -LiteralPath $output -Raw | ConvertFrom-Json
+    if ($existing.channels) { $Channels = @($existing.channels) }
+    elseif ($existing.channel) { $Channels = @($existing.channel) }
+}
+if (-not $Channels) { throw 'Specify at least one Twitch username with -Channels.' }
 
 function Get-EnvValue([string]$Path, [string]$Key) {
     $line = Get-Content -LiteralPath $Path | Where-Object { $_ -like "$Key=*" } | Select-Object -First 1
@@ -38,7 +47,7 @@ if (-not $ProxyUrl) {
 }
 
 $config = [ordered]@{
-    channel = 'shaneboehm'
+    channels = @($Channels)
     poll_seconds = 30
     watch_seconds = 300
     twitch_token = ((Get-EnvValue $twitchEnvPath 'BOT_OAUTH') -replace '^oauth:', '')
@@ -59,6 +68,5 @@ $config = [ordered]@{
     })
 }
 
-$output = Join-Path $PSScriptRoot 'config.json'
 $config | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $output -Encoding utf8
-Write-Host "Wrote private config.json with $($cookies.Count) Twitch cookies."
+Write-Host "Wrote private config.json for $($Channels.Count) Twitch channels with $($cookies.Count) Twitch cookies."

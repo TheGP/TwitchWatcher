@@ -36,7 +36,8 @@ type cookie struct {
 }
 
 type config struct {
-	Channel      string   `json:"channel"`
+	Channel      string   `json:"channel,omitempty"` // Legacy single-channel config.
+	Channels     []string `json:"channels"`
 	PollSeconds  int      `json:"poll_seconds"`
 	WatchSeconds int      `json:"watch_seconds"`
 	TwitchToken  string   `json:"twitch_token"`
@@ -48,9 +49,10 @@ type config struct {
 }
 
 type state struct {
-	CompletedStreamID string `json:"completed_stream_id"`
-	AuthLost          bool   `json:"auth_lost"`
-	AuthAlerted       bool   `json:"auth_alerted"`
+	CompletedStreamID string            `json:"completed_stream_id,omitempty"` // Legacy state.
+	CompletedStreams  map[string]string `json:"completed_streams,omitempty"`
+	AuthLost          bool              `json:"auth_lost"`
+	AuthAlerted       bool              `json:"auth_alerted"`
 }
 
 type steelSession struct {
@@ -80,11 +82,13 @@ func main() {
 		if _, err := validateTwitchToken(ctx, client, viewerToken(cfg)); err != nil {
 			log.Fatalf("Firefox Twitch login cookie is invalid: %v", err)
 		}
-		id, err := liveStreamID(ctx, client, cfg.Channel, cfg.TwitchToken, clientID)
+		streams, err := liveStreamIDs(ctx, client, cfg.Channels, cfg.TwitchToken, clientID)
 		if err != nil {
 			log.Fatal(err)
 		}
-		log.Printf("channel=%s live=%t", cfg.Channel, id != "")
+		for _, channel := range cfg.Channels {
+			log.Printf("channel=%s live=%t", channel, streams[channel] != "")
+		}
 		return
 	}
 	if *probe {
@@ -111,8 +115,20 @@ func loadConfig(path string) (config, error) {
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		return cfg, fmt.Errorf("parse config: %w", err)
 	}
-	if !twitchLogin.MatchString(cfg.Channel) || cfg.TwitchToken == "" || cfg.SteelAPIKey == "" || !validTelegramToken.MatchString(cfg.TelegramBot) || cfg.TelegramChat == "" {
-		return cfg, errors.New("config requires channel, twitch_token, steel_api_key, telegram_bot, and telegram_chat")
+	if len(cfg.Channels) == 0 && cfg.Channel != "" {
+		cfg.Channels = []string{cfg.Channel}
+	}
+	if len(cfg.Channels) == 0 || len(cfg.Channels) > 100 || cfg.TwitchToken == "" || cfg.SteelAPIKey == "" || !validTelegramToken.MatchString(cfg.TelegramBot) || cfg.TelegramChat == "" {
+		return cfg, errors.New("config requires 1..100 channels, twitch_token, steel_api_key, telegram_bot, and telegram_chat")
+	}
+	seen := make(map[string]bool, len(cfg.Channels))
+	for i, channel := range cfg.Channels {
+		channel = strings.ToLower(channel)
+		if !twitchLogin.MatchString(channel) || seen[channel] {
+			return cfg, fmt.Errorf("invalid or duplicate Twitch channel %q", channel)
+		}
+		cfg.Channels[i] = channel
+		seen[channel] = true
 	}
 	hasAuth := false
 	for _, item := range cfg.Cookies {
@@ -162,26 +178,31 @@ func validateTwitchToken(ctx context.Context, client *http.Client, token string)
 	return response.ClientID, nil
 }
 
-func liveStreamID(ctx context.Context, client *http.Client, channel, token, clientID string) (string, error) {
-	endpoint := "https://api.twitch.tv/helix/streams?user_login=" + url.QueryEscape(channel)
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+func liveStreamIDs(ctx context.Context, client *http.Client, channels []string, token, clientID string) (map[string]string, error) {
+	query := url.Values{"first": {"100"}}
+	for _, channel := range channels {
+		query.Add("user_login", channel)
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://api.twitch.tv/helix/streams?"+query.Encode(), nil)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	request.Header.Set("Authorization", "Bearer "+token)
 	request.Header.Set("Client-Id", clientID)
 	var response struct {
 		Data []struct {
-			ID string `json:"id"`
+			ID        string `json:"id"`
+			UserLogin string `json:"user_login"`
 		} `json:"data"`
 	}
 	if err := getJSON(client, request, &response); err != nil {
-		return "", fmt.Errorf("get Twitch stream: %w", err)
+		return nil, fmt.Errorf("get Twitch streams: %w", err)
 	}
-	if len(response.Data) == 0 {
-		return "", nil
+	streams := make(map[string]string, len(response.Data))
+	for _, stream := range response.Data {
+		streams[strings.ToLower(stream.UserLogin)] = stream.ID
 	}
-	return response.Data[0].ID, nil
+	return streams, nil
 }
 
 func getJSON(client *http.Client, request *http.Request, target any) error {
@@ -196,48 +217,134 @@ func getJSON(client *http.Client, request *http.Request, target any) error {
 	return json.NewDecoder(io.LimitReader(response.Body, 1<<20)).Decode(target)
 }
 
-func run(ctx context.Context, client *http.Client, cfg config, clientID, statePath string) error {
+func loadState(statePath string, cfg config) (state, error) {
 	var previous state
 	if data, err := os.ReadFile(statePath); err == nil {
 		if err := json.Unmarshal(data, &previous); err != nil {
-			return fmt.Errorf("parse state: %w", err)
+			return previous, fmt.Errorf("parse state: %w", err)
 		}
 	} else if !os.IsNotExist(err) {
-		return fmt.Errorf("read state: %w", err)
+		return previous, fmt.Errorf("read state: %w", err)
 	}
-	log.Printf("monitoring %s every %d seconds", cfg.Channel, cfg.PollSeconds)
+	if previous.CompletedStreams == nil {
+		previous.CompletedStreams = make(map[string]string)
+	}
+	if previous.CompletedStreamID != "" {
+		channel := cfg.Channel
+		if channel == "" {
+			channel = cfg.Channels[0]
+		}
+		channel = strings.ToLower(channel)
+		if _, exists := previous.CompletedStreams[channel]; !exists {
+			previous.CompletedStreams[channel] = previous.CompletedStreamID
+		}
+		previous.CompletedStreamID = ""
+	}
+	return previous, nil
+}
+
+type watchResult struct {
+	channel    string
+	streamID   string
+	generation uint64
+	err        error
+}
+
+type activeWatch struct {
+	cancel     context.CancelFunc
+	generation uint64
+}
+
+func run(ctx context.Context, client *http.Client, cfg config, clientID, statePath string) error {
+	return runWithWatch(ctx, client, cfg, clientID, statePath, watchStream)
+}
+
+func runWithWatch(ctx context.Context, client *http.Client, cfg config, clientID, statePath string, watch func(context.Context, *http.Client, config, string) error) error {
+	previous, err := loadState(statePath, cfg)
+	if err != nil {
+		return err
+	}
+	log.Printf("monitoring %d channels every %d seconds", len(cfg.Channels), cfg.PollSeconds)
 	auth := authMonitor{client: client, cfg: cfg, state: &previous, statePath: statePath}
-	for {
+	runCtx, cancelRun := context.WithCancel(ctx)
+	defer cancelRun()
+	results := make(chan watchResult, len(cfg.Channels))
+	active := make(map[string]activeWatch)
+	var generation uint64
+	cancelActive := func() {
+		for channel, watch := range active {
+			watch.cancel()
+			delete(active, channel)
+		}
+	}
+	defer cancelActive()
+	poll := func() error {
 		canWatch, err := auth.check(ctx)
 		if err != nil {
 			return err
 		}
-		if canWatch {
-			id, err := liveStreamID(ctx, client, cfg.Channel, cfg.TwitchToken, clientID)
-			if err != nil {
-				log.Printf("live check failed: %v", err)
-			} else if id != "" && id != previous.CompletedStreamID {
-				log.Printf("stream %s is live; starting Steel watch", id)
-				if err := watchStream(ctx, client, cfg); err != nil {
-					if errors.Is(err, errTwitchAuthLost) {
-						auth.markLost()
-						auth.notify(ctx)
-					} else {
-						log.Printf("watch failed: %s", redactError(err, cfg))
-					}
-				} else {
-					previous.CompletedStreamID = id
-					if err := saveState(statePath, previous); err != nil {
-						return err
-					}
-					log.Printf("completed %d seconds for stream %s", cfg.WatchSeconds, id)
-				}
-			}
+		if !canWatch {
+			cancelActive()
+			return nil
 		}
+		streams, err := liveStreamIDs(ctx, client, cfg.Channels, cfg.TwitchToken, clientID)
+		if err != nil {
+			log.Printf("live check failed: %v", err)
+			return nil
+		}
+		for _, channel := range cfg.Channels {
+			id := streams[channel]
+			_, running := active[channel]
+			if id == "" || id == previous.CompletedStreams[channel] || running {
+				continue
+			}
+			log.Printf("channel=%s stream=%s is live; starting Steel watch", channel, id)
+			watchCtx, cancel := context.WithCancel(runCtx)
+			generation++
+			active[channel] = activeWatch{cancel: cancel, generation: generation}
+			go func(channel, id string, generation uint64) {
+				result := watchResult{channel: channel, streamID: id, generation: generation, err: watch(watchCtx, client, cfg, channel)}
+				select {
+				case results <- result:
+				case <-runCtx.Done():
+				}
+			}(channel, id, generation)
+		}
+		return nil
+	}
+	if err := poll(); err != nil {
+		return err
+	}
+	ticker := time.NewTicker(time.Duration(cfg.PollSeconds) * time.Second)
+	defer ticker.Stop()
+	for {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-time.After(time.Duration(cfg.PollSeconds) * time.Second):
+		case <-ticker.C:
+			if err := poll(); err != nil {
+				return err
+			}
+		case result := <-results:
+			current, exists := active[result.channel]
+			if !exists || current.generation != result.generation {
+				continue // A canceled watch has already been stopped.
+			}
+			current.cancel()
+			delete(active, result.channel)
+			if errors.Is(result.err, errTwitchAuthLost) {
+				auth.markLost()
+				auth.notify(ctx)
+				cancelActive()
+			} else if result.err != nil {
+				log.Printf("channel=%s watch failed: %s", result.channel, redactError(result.err, cfg))
+			} else {
+				previous.CompletedStreams[result.channel] = result.streamID
+				if err := saveState(statePath, previous); err != nil {
+					return err
+				}
+				log.Printf("channel=%s completed %d seconds for stream %s", result.channel, cfg.WatchSeconds, result.streamID)
+			}
 		}
 	}
 }
@@ -270,10 +377,10 @@ func saveState(path string, value state) error {
 	return nil
 }
 
-func watchStream(ctx context.Context, client *http.Client, cfg config) error {
+func watchStream(ctx context.Context, client *http.Client, cfg config, channel string) error {
 	// Reserve time for auth confirmation, playback startup, and cleanup.
 	timeout := time.Duration(cfg.WatchSeconds+130) * time.Second
-	return openSteelPage(ctx, client, cfg, "https://www.twitch.tv/"+cfg.Channel, timeout, func(pageCtx context.Context, browser *cdpClient) error {
+	return openSteelPage(ctx, client, cfg, "https://www.twitch.tv/"+channel, timeout, func(pageCtx context.Context, browser *cdpClient) error {
 		if err := confirmBrowserAuth(pageCtx, browser); err != nil {
 			return err
 		}

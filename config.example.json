@@ -1,5 +1,5 @@
 {
-  "channel": "shaneboehm",
+  "channels": ["streamer_one", "streamer_two"],
   "poll_seconds": 30,
   "watch_seconds": 300,
   "twitch_token": "Twitch OAuth access token for Helix",
