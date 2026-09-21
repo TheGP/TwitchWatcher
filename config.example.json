@@ -1,7 +1,7 @@
 {
   "channels": ["streamer_one", "streamer_two"],
   "poll_seconds": 30,
-  "watch_seconds": 300,
+  "watch_seconds": 360,
   "twitch_token": "Twitch OAuth access token for Helix",
   "steel_api_key": "Steel API key",
   "telegram_bot": "Telegram bot token",

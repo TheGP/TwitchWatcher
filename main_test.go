@@ -36,6 +36,7 @@ func TestLoadConfigRejectsLocalProxyAndMissingAuth(t *testing.T) {
 		{"bad channel", func(cfg *config) { cfg.Channels = []string{"bad/channel"} }, true},
 		{"duplicate channel", func(cfg *config) { cfg.Channels = []string{"One", "one"} }, true},
 		{"too many channels", func(cfg *config) { cfg.Channels = make([]string, 101) }, true},
+		{"watch longer than session cap", func(cfg *config) { cfg.WatchSeconds = 361 }, true},
 		{"legacy channel", func(cfg *config) { cfg.Channels = nil; cfg.Channel = "Streamer_One" }, false},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -206,72 +207,43 @@ func TestRedactError(t *testing.T) {
 	}
 }
 
-func TestPlaybackProgressCountsOnlyVerifiedReadyVideo(t *testing.T) {
-	var progress playbackProgress
-	playing := playbackSample{Present: true, Ready: true, Time: 10}
-	next := playbackSample{Present: true, Ready: true, Time: 15}
-	if delta := progress.add(playing, next, 5*time.Second); delta != 5*time.Second {
-		t.Fatalf("playing video credited %s, want 5s", delta)
-	}
-	paused := next
-	paused.Paused = true
-	if delta := progress.add(next, paused, 5*time.Second); delta != 0 {
-		t.Fatalf("paused video credited %s", delta)
-	}
-	unloaded := next
-	unloaded.Ready = false
-	if delta := progress.add(unloaded, playbackSample{Present: true, Ready: true, Time: 30}, 5*time.Second); delta != 0 {
-		t.Fatalf("unloaded video credited %s", delta)
-	}
-	missing := next
-	missing.Present = false
-	if delta := progress.add(missing, playbackSample{Present: true, Ready: true, Time: 35}, 5*time.Second); delta != 0 {
-		t.Fatalf("missing video credited %s", delta)
-	}
-	jump := playbackSample{Present: true, Ready: true, Time: 45}
-	if delta := progress.add(next, jump, 30*time.Second); delta != 0 {
-		t.Fatalf("long unobserved gap credited %s", delta)
-	}
-	reset := playing
-	if delta := progress.add(jump, reset, 5*time.Second); delta != 0 {
-		t.Fatalf("reset video timeline credited %s", delta)
-	}
-	if progress.watched != 5*time.Second {
-		t.Fatalf("verified progress=%s, want 5s", progress.watched)
-	}
-}
-
-func TestWatchUntilPlaybackCarriesProgressAcrossSessions(t *testing.T) {
+func TestWatchLoadedPageRetriesLoadFailure(t *testing.T) {
 	attempts := 0
-	err := watchUntilPlayback(context.Background(), config{}, "example", 5*time.Second, 0, func(_ context.Context, timeout time.Duration, progress *playbackProgress) error {
+	err := watchLoadedPage(context.Background(), config{}, "example", 0, func(context.Context) error {
 		attempts++
-		if timeout > maxSteelSession {
-			t.Fatalf("session timeout exceeds 15 minutes: %s", timeout)
-		}
 		if attempts == 1 {
-			progress.watched += 2 * time.Second
-			return errors.New("control connection dropped")
+			return errors.New("video not loaded")
 		}
-		progress.watched += 3 * time.Second
 		return nil
 	})
 	if err != nil || attempts != 2 {
-		t.Fatalf("progress did not carry between sessions: attempts=%d err=%v", attempts, err)
+		t.Fatalf("load was not retried: attempts=%d err=%v", attempts, err)
 	}
 }
 
-func TestWatchUntilPlaybackBoundsEmptySessions(t *testing.T) {
+func TestWatchLoadedPageBoundsFailures(t *testing.T) {
 	attempts := 0
-	err := watchUntilPlayback(context.Background(), config{}, "example", 5*time.Second, 0, func(_ context.Context, _ time.Duration, _ *playbackProgress) error {
+	err := watchLoadedPage(context.Background(), config{}, "example", 0, func(context.Context) error {
 		attempts++
 		return errors.New("proxy tunnel failed")
 	})
-	if !errors.Is(err, errNoPlayback) || attempts != maxNoProgressSessions {
-		t.Fatalf("no-progress retry limit: attempts=%d err=%v", attempts, err)
+	if !errors.Is(err, errVideoNotLoaded) || attempts != maxLoadAttempts {
+		t.Fatalf("load retry limit: attempts=%d err=%v", attempts, err)
 	}
 }
 
-func TestRunCoolsDownSameStreamAfterNoPlayback(t *testing.T) {
+func TestWatchLoadedPageDoesNotRetryInterruptedHold(t *testing.T) {
+	attempts := 0
+	err := watchLoadedPage(context.Background(), config{}, "example", 0, func(context.Context) error {
+		attempts++
+		return errPageHoldInterrupted
+	})
+	if !errors.Is(err, errPageHoldInterrupted) || attempts != 1 {
+		t.Fatalf("interrupted hold was retried: attempts=%d err=%v", attempts, err)
+	}
+}
+
+func TestRunCoolsDownSameStreamAfterVideoLoadFailure(t *testing.T) {
 	client := &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
 		switch request.URL.Host {
 		case "id.twitch.tv":
@@ -285,7 +257,7 @@ func TestRunCoolsDownSameStreamAfterNoPlayback(t *testing.T) {
 	var attempts atomic.Int32
 	watch := func(context.Context, *http.Client, config, string) error {
 		attempts.Add(1)
-		return errNoPlayback
+		return errVideoNotLoaded
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2300*time.Millisecond)
 	defer cancel()

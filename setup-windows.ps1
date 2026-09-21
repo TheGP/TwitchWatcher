@@ -57,7 +57,7 @@ if ($parsedProxy.Host -eq 'dataimpulse.com' -or $parsedProxy.Host.EndsWith('.dat
 $config = [ordered]@{
     channels = @($Channels)
     poll_seconds = 30
-    watch_seconds = 300
+    watch_seconds = 360
     twitch_token = ((Get-EnvValue $twitchEnvPath 'BOT_OAUTH') -replace '^oauth:', '')
     steel_api_key = Get-EnvValue $discoveryEnvPath 'STEEL_API_KEY'
     telegram_bot = ((Get-EnvValue $twitchEnvPath 'DEVELOPER_TELEGRAM_BOT_TOKEN') -replace '^bot', '')
