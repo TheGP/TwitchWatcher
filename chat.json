@@ -5,20 +5,20 @@
       "messages": [
         {
           "id": "intro-mention",
-          "text": "Hello, why you don't mention me in your every stream??? I told you I will be listening your streams but not live.",
+          "text": "Hello, why you don't mention me in your every stream??? I told you I will be listening your streams but in recording!",
           "delay_seconds": 0,
           "once": true
         },
         {
           "id": "intro-not-me",
           "text": "Do you know its not me who is talking to you right now?",
-          "delay_seconds": 180,
+          "delay_seconds": 60,
           "once": true
         },
         {
           "id": "intro-bot",
-          "text": "I wrote a bot to send those messages. I am literally sleeping right now!",
-          "delay_seconds": 240,
+          "text": "I wrote a bot to send those messages. I am literally sleeping right now! I will listen to your replies tomorrow",
+          "delay_seconds": 120,
           "once": true
         },
         {
