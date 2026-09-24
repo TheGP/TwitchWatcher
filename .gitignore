@@ -1,4 +1,5 @@
 config.json
+.env
 state.json
 state.json.tmp
 twitch-watcher

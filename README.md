@@ -31,3 +31,19 @@ The deploy script builds the Go binary and starts or restarts `twitch-watcher` u
 The watcher checks that Twitch's visible video element has loaded, then leaves that same Steel browser page open for `watch_seconds` (six minutes by default). It does not sample or total playback time after the initial load check. Steel's inactivity timeout is extended past the hold period so an idle control connection does not close the page. If the video cannot load, the watcher tries up to three fresh sessions; it never combines time from different pages. Every watch session has a nine-minute hard timeout, including login and video loading, so it cannot run for ten minutes and Steel closes it even if the watcher process crashes before releasing it. `watch_seconds` can be 1–360 seconds. A stream is marked complete after the hold finishes. Adding more live channels starts more simultaneous Steel sessions and can increase usage. Old single-stream `state.json` files migrate to the first configured channel (or the legacy `channel` field if present).
 
 The service validates the saved Firefox login token at startup and hourly. It also checks the browser UI before starting the six-minute hold. If Twitch rejects the token or shows the signed-out login button, it stops watching and sends one Telegram alert to the configured developer chat. The alert flag is saved in `state.json` so restarts do not repeat it. Failed Telegram sends are retried on later polls. If Telegram succeeds but saving state fails, a restart may repeat the alert. After the login is restored, the service rechecks the browser each minute before resuming.
+
+## Chat-only schedules
+
+`chat.json` contains chat-only channels and messages; those channels never open Steel unless they are also listed in `config.json`. Message IDs are stable state keys, so editing message text does not resend a one-time message. `delay_seconds` is measured from the first poll that detects a new Twitch stream. A message with `once: true` is sent only once across all streams. A message with `interval_seconds` resets for every new stream, first sends after `delay_seconds`, and then repeats at that interval while the same stream remains live. At most one due message is sent per poll, preventing a restart from bursting several overdue messages at once.
+
+Put the chat account's user token in an ignored `.env` file:
+
+```dotenv
+TWITCH_CHAT_TOKEN=token-with-chat-read-and-chat-edit
+```
+
+The service validates the token login and both IRC chat scopes at startup. Chat sends use Twitch's secure IRC WebSocket and are recorded in `state.json` only after Twitch returns the post-send `USERSTATE` confirmation. To test delivery in a channel without requiring it to be live, send the first configured message once without changing persistent state:
+
+```bash
+./twitch-watcher -chat-test eugenebos
+```

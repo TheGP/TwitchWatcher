@@ -52,10 +52,12 @@ type config struct {
 }
 
 type state struct {
-	CompletedStreamID string            `json:"completed_stream_id,omitempty"` // Legacy state.
-	CompletedStreams  map[string]string `json:"completed_streams,omitempty"`
-	AuthLost          bool              `json:"auth_lost"`
-	AuthAlerted       bool              `json:"auth_alerted"`
+	CompletedStreamID string                      `json:"completed_stream_id,omitempty"` // Legacy state.
+	CompletedStreams  map[string]string           `json:"completed_streams,omitempty"`
+	ChatStreams       map[string]chatStreamState  `json:"chat_streams,omitempty"`
+	ChatMessages      map[string]chatMessageState `json:"chat_messages,omitempty"`
+	AuthLost          bool                        `json:"auth_lost"`
+	AuthAlerted       bool                        `json:"auth_alerted"`
 }
 
 type steelSession struct {
@@ -66,6 +68,8 @@ type steelSession struct {
 func main() {
 	configPath := flag.String("config", "config.json", "private config file")
 	statePath := flag.String("state", "state.json", "completed stream state file")
+	chatConfigPath := flag.String("chat-config", "chat.json", "chat schedule config file")
+	chatTest := flag.String("chat-test", "", "send the first configured message to this channel without requiring a live stream")
 	check := flag.Bool("check", false, "validate config and query live status once without opening Steel")
 	probe := flag.Bool("probe", false, "open and release one Steel browser to verify the Twitch login")
 	flag.Parse()
@@ -77,19 +81,49 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	client := &http.Client{Timeout: 30 * time.Second}
+	chatCfg, err := loadChatConfig(*chatConfigPath)
+	if err != nil {
+		log.Fatal(err)
+	}
+	if len(monitoredChannels(cfg, chatCfg)) > 100 {
+		log.Fatal("combined watch and chat channels cannot exceed 100")
+	}
+	var chatter chatIdentity
+	if len(chatCfg.Targets) > 0 || *chatTest != "" {
+		chatToken, err := readChatToken(".env")
+		if err != nil {
+			log.Fatal(err)
+		}
+		chatter, err = validateChatToken(ctx, client, chatToken)
+		if err != nil {
+			log.Fatal(err)
+		}
+	}
 	clientID, err := validateTwitchToken(ctx, client, cfg.TwitchToken)
 	if err != nil {
 		log.Fatal(err)
+	}
+	if *chatTest != "" {
+		if len(chatCfg.Targets) == 0 || len(chatCfg.Targets[0].Messages) == 0 {
+			log.Fatal("chat test requires at least one configured message")
+		}
+		channel := strings.ToLower(*chatTest)
+		if err := sendTwitchChat(ctx, chatter, channel, chatCfg.Targets[0].Messages[0].Text); err != nil {
+			log.Fatal(err)
+		}
+		log.Printf("chat test message sent to %s", channel)
+		return
 	}
 	if *check {
 		if _, err := validateTwitchToken(ctx, client, viewerToken(cfg)); err != nil {
 			log.Fatalf("Firefox Twitch login cookie is invalid: %v", err)
 		}
-		streams, err := liveStreamIDs(ctx, client, cfg.Channels, cfg.TwitchToken, clientID)
+		channels := monitoredChannels(cfg, chatCfg)
+		streams, err := liveStreamIDs(ctx, client, channels, cfg.TwitchToken, clientID)
 		if err != nil {
 			log.Fatal(err)
 		}
-		for _, channel := range cfg.Channels {
+		for _, channel := range channels {
 			log.Printf("channel=%s live=%t", channel, streams[channel] != "")
 		}
 		return
@@ -104,7 +138,7 @@ func main() {
 		log.Print("Steel browser loaded Twitch with the authenticated Firefox session")
 		return
 	}
-	if err := run(ctx, client, cfg, clientID, *statePath); err != nil && !errors.Is(err, context.Canceled) {
+	if err := run(ctx, client, cfg, chatCfg, chatter, clientID, *statePath); err != nil && !errors.Is(err, context.Canceled) {
 		log.Fatal(err)
 	}
 }
@@ -235,6 +269,12 @@ func loadState(statePath string, cfg config) (state, error) {
 	if previous.CompletedStreams == nil {
 		previous.CompletedStreams = make(map[string]string)
 	}
+	if previous.ChatStreams == nil {
+		previous.ChatStreams = make(map[string]chatStreamState)
+	}
+	if previous.ChatMessages == nil {
+		previous.ChatMessages = make(map[string]chatMessageState)
+	}
 	if previous.CompletedStreamID != "" {
 		channel := cfg.Channel
 		if channel == "" {
@@ -266,16 +306,24 @@ type watchCooldown struct {
 	until    time.Time
 }
 
-func run(ctx context.Context, client *http.Client, cfg config, clientID, statePath string) error {
-	return runWithWatch(ctx, client, cfg, clientID, statePath, watchStream)
+func run(ctx context.Context, client *http.Client, cfg config, chatCfg chatConfig, chatter chatIdentity, clientID, statePath string) error {
+	send := func(ctx context.Context, channel, message string) error {
+		return sendTwitchChat(ctx, chatter, channel, message)
+	}
+	return runServices(ctx, client, cfg, chatCfg, clientID, statePath, watchStream, send)
 }
 
 func runWithWatch(ctx context.Context, client *http.Client, cfg config, clientID, statePath string, watch func(context.Context, *http.Client, config, string) error) error {
+	return runServices(ctx, client, cfg, chatConfig{}, clientID, statePath, watch, nil)
+}
+
+func runServices(ctx context.Context, client *http.Client, cfg config, chatCfg chatConfig, clientID, statePath string, watch func(context.Context, *http.Client, config, string) error, send chatSendFunc) error {
 	previous, err := loadState(statePath, cfg)
 	if err != nil {
 		return err
 	}
-	log.Printf("monitoring %d channels every %d seconds", len(cfg.Channels), cfg.PollSeconds)
+	channels := monitoredChannels(cfg, chatCfg)
+	log.Printf("monitoring %d channels every %d seconds", len(channels), cfg.PollSeconds)
 	auth := authMonitor{client: client, cfg: cfg, state: &previous, statePath: statePath}
 	runCtx, cancelRun := context.WithCancel(ctx)
 	defer cancelRun()
@@ -291,17 +339,28 @@ func runWithWatch(ctx context.Context, client *http.Client, cfg config, clientID
 	}
 	defer cancelActive()
 	poll := func() error {
+		streams, err := liveStreamIDs(ctx, client, channels, cfg.TwitchToken, clientID)
+		if err != nil {
+			log.Printf("live check failed: %v", err)
+			return nil
+		}
+		if send != nil {
+			changed, err := processChatSchedules(ctx, chatCfg.Targets, streams, &previous, time.Now(), send)
+			if changed {
+				if saveErr := saveState(statePath, previous); saveErr != nil {
+					return saveErr
+				}
+			}
+			if err != nil {
+				log.Printf("chat send failed: %v", err)
+			}
+		}
 		canWatch, err := auth.check(ctx)
 		if err != nil {
 			return err
 		}
 		if !canWatch {
 			cancelActive()
-			return nil
-		}
-		streams, err := liveStreamIDs(ctx, client, cfg.Channels, cfg.TwitchToken, clientID)
-		if err != nil {
-			log.Printf("live check failed: %v", err)
 			return nil
 		}
 		for _, channel := range cfg.Channels {

@@ -1,0 +1,33 @@
+{
+  "targets": [
+    {
+      "channel": "platinumbabydoll",
+      "messages": [
+        {
+          "id": "intro-mention",
+          "text": "Hello, why you don't mention me in your every stream??? I told you I will be listening your streams but not live.",
+          "delay_seconds": 0,
+          "once": true
+        },
+        {
+          "id": "intro-not-me",
+          "text": "Do you know its not me who is talking to you right now?",
+          "delay_seconds": 180,
+          "once": true
+        },
+        {
+          "id": "intro-bot",
+          "text": "I wrote a bot to send those messages. I am literally sleeping right now!",
+          "delay_seconds": 240,
+          "once": true
+        },
+        {
+          "id": "dance",
+          "text": "djnyx8Dancegirl djnyx8Dancegirl djnyx8Dancegirl djnyx8Dancegirl djnyx8Dancegirl",
+          "delay_seconds": 1200,
+          "interval_seconds": 1200
+        }
+      ]
+    }
+  ]
+}
