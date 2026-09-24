@@ -5,7 +5,7 @@
       "messages": [
         {
           "id": "intro-mention",
-          "text": "Hello, why you don't mention me in your every stream??? I told you I will be listening your streams but in recording!",
+          "text": "Hello, why you don't mention me on your every stream??? I told you I will be listening your streams but in recording!",
           "delay_seconds": 0,
           "once": true
         },
