@@ -4,6 +4,12 @@
       "channel": "platinumbabydoll",
       "messages": [
         {
+          "id": "followup-no-reply",
+          "text": "Hello. Wow you didnt reply on my messages yesterday and even didn't say hi. And was licking all other viewers. Wow Thanks a lot!",
+          "delay_seconds": 0,
+          "once": true
+        },
+        {
           "id": "intro-mention",
           "text": "Hello, why you don't mention me on your every stream??? I told you I will be listening your streams but in recording!",
           "delay_seconds": 0,
