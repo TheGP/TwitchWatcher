@@ -5,8 +5,8 @@
       "messages": [
         {
           "id": "followup-no-reply",
-          "text": "Hello. Wow you didnt reply on my messages yesterday and even didn't say hi. And was licking all other viewers. Wow Thanks a lot!",
-          "delay_seconds": 0,
+          "text": "Hello, did you understand that I record your stream and then watching it in recording later? Because Im sleeping now",
+          "delay_seconds": 30,
           "once": true
         },
         {
