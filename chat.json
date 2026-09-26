@@ -4,6 +4,12 @@
       "channel": "platinumbabydoll",
       "messages": [
         {
+          "id": "followup-can-you-see",
+          "text": "Hello, can you see my messages?",
+          "delay_seconds": 30,
+          "once": true
+        },
+        {
           "id": "followup-no-reply",
           "text": "Hello, did you understand that I record your stream and then watching it in recording later? Because Im sleeping now",
           "delay_seconds": 30,
