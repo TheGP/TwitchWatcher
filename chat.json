@@ -10,6 +10,12 @@
           "once": true
         },
         {
+          "id": "followup-appreciation",
+          "text": "I'm watching your every stream, and you mentioned me 0 times in recent streams, thanks for appreciation I guess",
+          "delay_seconds": 60,
+          "once": true
+        },
+        {
           "id": "followup-no-reply",
           "text": "Hello, did you understand that I record your stream and then watching it in recording later? Because Im sleeping now",
           "delay_seconds": 30,
