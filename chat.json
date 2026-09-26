@@ -41,9 +41,14 @@
         },
         {
           "id": "dance",
-          "text": "djnyx8Dancegirl djnyx8Dancegirl djnyx8Dancegirl djnyx8Dancegirl djnyx8Dancegirl",
-          "delay_seconds": 1200,
-          "interval_seconds": 1200
+          "texts": [
+            "djnyx8Dancegirl djnyx8Dancegirl djnyx8Dancegirl djnyx8Dancegirl djnyx8Dancegirl",
+            "djnyx8HeMan djnyx8HeMan djnyx8HeMan djnyx8HeMan djnyx8HeMan",
+            "djnyx8Cardance djnyx8Cardance djnyx8Cardance djnyx8Cardance djnyx8Cardance",
+            "djnyx8Pedro djnyx8Pedro djnyx8Pedro djnyx8Pedro djnyx8Pedro"
+          ],
+          "interval_min_seconds": 600,
+          "interval_max_seconds": 1800
         }
       ]
     }

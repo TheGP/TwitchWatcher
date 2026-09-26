@@ -34,7 +34,7 @@ The service validates the saved Firefox login token at startup and hourly. It al
 
 ## Chat-only schedules
 
-`chat.json` contains chat-only channels and messages; those channels never open Steel unless they are also listed in `config.json`. Message IDs are stable state keys, so editing message text does not resend a one-time message. `delay_seconds` is measured from the first poll that detects a new Twitch stream. A message with `once: true` is sent only once across all streams. A message with `interval_seconds` resets for every new stream, first sends after `delay_seconds`, and then repeats at that interval while the same stream remains live. At most one due message is sent per poll, preventing a restart from bursting several overdue messages at once.
+`chat.json` contains chat-only channels and messages; those channels never open Steel unless they are also listed in `config.json`. Message IDs are stable state keys, so editing message text does not resend a one-time message. `delay_seconds` is measured from the first poll that detects a new Twitch stream. A message with `once: true` is sent only once across all streams. Repeating messages can use a fixed `interval_seconds` or an `interval_min_seconds`/`interval_max_seconds` range. When a range is used without `delay_seconds`, both the first send and every later send use a new random interval in that range. The chosen next-send time is saved in `state.json`, so restarts do not reroll it. Use `texts` instead of `text` to select a random message for each send. At most one due message is sent per poll, preventing a restart from bursting several overdue messages at once.
 
 Put the chat account's user token in an ignored `.env` file:
 

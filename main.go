@@ -108,7 +108,7 @@ func main() {
 			log.Fatal("chat test requires at least one configured message")
 		}
 		channel := strings.ToLower(*chatTest)
-		if err := sendTwitchChat(ctx, chatter, channel, chatCfg.Targets[0].Messages[0].Text); err != nil {
+		if err := sendTwitchChat(ctx, chatter, channel, randomMessageText(chatCfg.Targets[0].Messages[0])); err != nil {
 			log.Fatal(err)
 		}
 		log.Printf("chat test message sent to %s", channel)

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math/rand/v2"
 	"net/http"
 	"os"
 	"regexp"
@@ -30,11 +31,14 @@ type chatTarget struct {
 }
 
 type chatMessage struct {
-	ID              string `json:"id"`
-	Text            string `json:"text"`
-	DelaySeconds    int    `json:"delay_seconds"`
-	Once            bool   `json:"once,omitempty"`
-	IntervalSeconds int    `json:"interval_seconds,omitempty"`
+	ID                 string   `json:"id"`
+	Text               string   `json:"text,omitempty"`
+	Texts              []string `json:"texts,omitempty"`
+	DelaySeconds       int      `json:"delay_seconds"`
+	Once               bool     `json:"once,omitempty"`
+	IntervalSeconds    int      `json:"interval_seconds,omitempty"`
+	IntervalMinSeconds int      `json:"interval_min_seconds,omitempty"`
+	IntervalMaxSeconds int      `json:"interval_max_seconds,omitempty"`
 }
 
 type chatIdentity struct {
@@ -51,6 +55,7 @@ type chatMessageState struct {
 	SentAt     time.Time `json:"sent_at,omitempty"`
 	StreamID   string    `json:"stream_id,omitempty"`
 	LastSentAt time.Time `json:"last_sent_at,omitempty"`
+	NextSentAt time.Time `json:"next_sent_at,omitempty"`
 }
 
 type chatSendFunc func(context.Context, string, string) error
@@ -81,14 +86,31 @@ func loadChatConfig(path string) (chatConfig, error) {
 				return cfg, fmt.Errorf("invalid or duplicate chat message ID %q for %s", message.ID, target.Channel)
 			}
 			seenIDs[message.ID] = true
-			if message.Text == "" || strings.TrimSpace(message.Text) != message.Text || strings.ContainsAny(message.Text, "\r\n") || len(message.Text) > 400 {
-				return cfg, fmt.Errorf("chat message %s/%s must be 1..400 bytes without surrounding whitespace or newlines", target.Channel, message.ID)
+			if (message.Text == "") == (len(message.Texts) == 0) {
+				return cfg, fmt.Errorf("chat message %s/%s must have exactly one of text or texts", target.Channel, message.ID)
+			}
+			texts := message.Texts
+			if message.Text != "" {
+				texts = []string{message.Text}
+			}
+			for _, text := range texts {
+				if text == "" || strings.TrimSpace(text) != text || strings.ContainsAny(text, "\r\n") || len(text) > 400 {
+					return cfg, fmt.Errorf("chat message %s/%s texts must be 1..400 bytes without surrounding whitespace or newlines", target.Channel, message.ID)
+				}
 			}
 			if message.DelaySeconds < 0 || message.DelaySeconds > 86400 {
 				return cfg, fmt.Errorf("invalid delay for chat message %s/%s", target.Channel, message.ID)
 			}
-			if message.Once == (message.IntervalSeconds > 0) || (!message.Once && message.IntervalSeconds < 60) || message.IntervalSeconds > 86400 {
-				return cfg, fmt.Errorf("chat message %s/%s must be once or have a 60..86400 second interval", target.Channel, message.ID)
+			hasFixedInterval := message.IntervalSeconds > 0
+			hasIntervalRange := message.IntervalMinSeconds > 0 || message.IntervalMaxSeconds > 0
+			if message.Once {
+				if hasFixedInterval || hasIntervalRange {
+					return cfg, fmt.Errorf("one-time chat message %s/%s cannot have an interval", target.Channel, message.ID)
+				}
+			} else if hasFixedInterval == hasIntervalRange ||
+				(hasFixedInterval && (message.IntervalSeconds < 60 || message.IntervalSeconds > 86400)) ||
+				(hasIntervalRange && (message.IntervalMinSeconds < 60 || message.IntervalMaxSeconds < message.IntervalMinSeconds || message.IntervalMaxSeconds > 86400)) {
+				return cfg, fmt.Errorf("repeating chat message %s/%s must have one fixed interval or a valid 60..86400 second interval range", target.Channel, message.ID)
 			}
 		}
 	}
@@ -180,15 +202,31 @@ func processChatSchedules(ctx context.Context, targets []chatTarget, streams map
 					continue
 				}
 				due = stream.DetectedAt.Add(time.Duration(message.DelaySeconds) * time.Second)
-			} else if delivery.StreamID != streamID {
-				due = stream.DetectedAt.Add(time.Duration(message.DelaySeconds) * time.Second)
 			} else {
-				due = delivery.LastSentAt.Add(time.Duration(message.IntervalSeconds) * time.Second)
+				if delivery.StreamID != streamID {
+					delivery = chatMessageState{StreamID: streamID}
+					delay := time.Duration(message.DelaySeconds) * time.Second
+					if delay == 0 {
+						delay = repeatInterval(message)
+					}
+					delivery.NextSentAt = stream.DetectedAt.Add(delay)
+					status.ChatMessages[key] = delivery
+					changed = true
+				} else if delivery.NextSentAt.IsZero() {
+					base := delivery.LastSentAt
+					if base.IsZero() {
+						base = stream.DetectedAt
+					}
+					delivery.NextSentAt = base.Add(repeatInterval(message))
+					status.ChatMessages[key] = delivery
+					changed = true
+				}
+				due = delivery.NextSentAt
 			}
 			if now.Before(due) {
 				continue
 			}
-			if err := send(ctx, target.Channel, message.Text); err != nil {
+			if err := send(ctx, target.Channel, randomMessageText(message)); err != nil {
 				return changed, fmt.Errorf("send chat message %s/%s: %w", target.Channel, message.ID, err)
 			}
 			if message.Once {
@@ -196,6 +234,7 @@ func processChatSchedules(ctx context.Context, targets []chatTarget, streams map
 			} else {
 				delivery.StreamID = streamID
 				delivery.LastSentAt = now
+				delivery.NextSentAt = now.Add(repeatInterval(message))
 			}
 			status.ChatMessages[key] = delivery
 			log.Printf("chat channel=%s message=%s sent", target.Channel, message.ID)
@@ -203,6 +242,24 @@ func processChatSchedules(ctx context.Context, targets []chatTarget, streams map
 		}
 	}
 	return changed, nil
+}
+
+func randomMessageText(message chatMessage) string {
+	if len(message.Texts) == 0 {
+		return message.Text
+	}
+	return message.Texts[rand.IntN(len(message.Texts))]
+}
+
+func repeatInterval(message chatMessage) time.Duration {
+	seconds := message.IntervalSeconds
+	if seconds == 0 {
+		seconds = message.IntervalMinSeconds
+		if spread := message.IntervalMaxSeconds - message.IntervalMinSeconds; spread > 0 {
+			seconds += rand.IntN(spread + 1)
+		}
+	}
+	return time.Duration(seconds) * time.Second
 }
 
 func sendTwitchChat(ctx context.Context, identity chatIdentity, channel, message string) error {

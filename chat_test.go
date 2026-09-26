@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 )
@@ -25,6 +26,17 @@ func TestProductionChatConfig(t *testing.T) {
 			t.Fatalf("duplicate message ID %q", message.ID)
 		}
 		seen[message.ID] = true
+		if message.ID == "dance" {
+			want := []string{
+				"djnyx8Dancegirl djnyx8Dancegirl djnyx8Dancegirl djnyx8Dancegirl djnyx8Dancegirl",
+				"djnyx8HeMan djnyx8HeMan djnyx8HeMan djnyx8HeMan djnyx8HeMan",
+				"djnyx8Cardance djnyx8Cardance djnyx8Cardance djnyx8Cardance djnyx8Cardance",
+				"djnyx8Pedro djnyx8Pedro djnyx8Pedro djnyx8Pedro djnyx8Pedro",
+			}
+			if !slices.Equal(message.Texts, want) || message.IntervalMinSeconds != 600 || message.IntervalMaxSeconds != 1800 {
+				t.Fatalf("unexpected randomized dance config: %+v", message)
+			}
+		}
 	}
 }
 
@@ -74,6 +86,41 @@ func TestChatScheduleDoesNotRecordFailedSend(t *testing.T) {
 	})
 	if err == nil || !status.ChatMessages["channel/first"].SentAt.IsZero() {
 		t.Fatalf("failed send was recorded: state=%+v err=%v", status.ChatMessages, err)
+	}
+}
+
+func TestChatSchedulePersistsRandomRangeAndChoosesConfiguredText(t *testing.T) {
+	target := chatTarget{Channel: "channel", Messages: []chatMessage{{
+		ID: "repeat", Texts: []string{"alpha", "beta"}, IntervalMinSeconds: 600, IntervalMaxSeconds: 1800,
+	}}}
+	started := time.Date(2026, 9, 26, 12, 0, 0, 0, time.UTC)
+	status := state{ChatStreams: map[string]chatStreamState{}, ChatMessages: map[string]chatMessageState{}}
+	streams := map[string]string{"channel": "stream-1"}
+	var sent string
+	send := func(_ context.Context, _ string, text string) error {
+		sent = text
+		return nil
+	}
+	changed, err := processChatSchedules(context.Background(), []chatTarget{target}, streams, &status, started, send)
+	if err != nil || !changed || sent != "" {
+		t.Fatalf("initial scheduling: changed=%v sent=%q err=%v", changed, sent, err)
+	}
+	delivery := status.ChatMessages["channel/repeat"]
+	if delay := delivery.NextSentAt.Sub(started); delay < 10*time.Minute || delay > 30*time.Minute {
+		t.Fatalf("initial random delay = %v, want 10..30 minutes", delay)
+	}
+	next := delivery.NextSentAt
+	changed, err = processChatSchedules(context.Background(), []chatTarget{target}, streams, &status, started.Add(time.Minute), send)
+	if err != nil || changed || status.ChatMessages["channel/repeat"].NextSentAt != next {
+		t.Fatalf("persisted schedule was rerolled: changed=%v state=%+v err=%v", changed, status.ChatMessages["channel/repeat"], err)
+	}
+	changed, err = processChatSchedules(context.Background(), []chatTarget{target}, streams, &status, next, send)
+	if err != nil || !changed || (sent != "alpha" && sent != "beta") {
+		t.Fatalf("random send: changed=%v sent=%q err=%v", changed, sent, err)
+	}
+	delivery = status.ChatMessages["channel/repeat"]
+	if delay := delivery.NextSentAt.Sub(next); delay < 10*time.Minute || delay > 30*time.Minute {
+		t.Fatalf("next random delay = %v, want 10..30 minutes", delay)
 	}
 }
 
