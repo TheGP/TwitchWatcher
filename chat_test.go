@@ -17,7 +17,7 @@ func TestProductionChatConfig(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(cfg.Targets) != 1 || cfg.Targets[0].Channel != "platinumbabydoll" || len(cfg.Targets[0].Messages) != 7 {
+	if len(cfg.Targets) != 1 || cfg.Targets[0].Channel != "platinumbabydoll" || len(cfg.Targets[0].Messages) != 8 {
 		t.Fatalf("unexpected production chat config: %+v", cfg)
 	}
 	seen := make(map[string]bool)

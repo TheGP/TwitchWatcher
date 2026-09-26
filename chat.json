@@ -16,6 +16,12 @@
           "once": true
         },
         {
+          "id": "followup-brain-pill",
+          "text": "And dont tell me \"Im not there\" I literally listening to the stream later, and if you have low IQ drink brain pill and try to appreciate viewers. You have only few.",
+          "delay_seconds": 120,
+          "once": true
+        },
+        {
           "id": "followup-no-reply",
           "text": "Hello, did you understand that I record your stream and then watching it in recording later? Because Im sleeping now",
           "delay_seconds": 30,
